@@ -21,13 +21,12 @@ model_constructor = functools.partial(create_model, num_layers=3)
 config = Spec.create(model_constructor) # a dictionary
 with open('config.json', 'w') as f:
     json.dump(config, f)
-model_constructor = Spec.instantiate(config)
+# model_constructor == Spec.instantiate(config)
 ```
 
 ```python
 from model import create_model
 from config_spec import recursive_partial_to_spec, recursive_spec_to_partial
-model_constructor = 
 config = {
     'model': functools.partial(create_model, num_layers=3),
     'optimizer': functools.partial(torch.optim.Adam, lr=1e-3),
