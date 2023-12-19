@@ -1,50 +1,73 @@
 from functools import partial
 import importlib
 from typing import Any, Dict, Tuple, TypedDict, Union
+import dataclasses
 
 
-class Spec(TypedDict):
-    """A dictionary representation of a function or class with default args and kwargs.
-    Useful as a JSON-serializable representation (e.g. for config files or ml_collections) of a callable.
+class SpecDict(TypedDict):
+    """The output of spec.to_dict() or dict(spec): a JSON-serializable dictionary representation of a function or class with default args and kwargs.
 
-    Note: Spec is just an alias for a dictionary (that is strongly typed), not a real class. So from
-    your code's perspective, it is just a dictionary.
-
-    Usage:
-        # Create a spec from a callable:
-        >>> from my_module import my_function
-        # Specs can be created from a partial:
-        >>> spec = Spec.create(functools.partial(my_function, arg1=1, arg2=2))
-        # or directly from a callable:
-        >>> spec = Spec.create(my_function, arg1=1, arg2=2) # or directly
-        # Same as above using the fully qualified import string:
-        >>> spec = Spec.create("my_module:my_function", arg1=1, arg2=2)
-
-        # Instantiate a callable from a spec:
-        >>> Spec.instantiate(spec) == partial(my_function, arg1=1, arg2=2)
-
-    module (str): The module the callable is located in
-    name (str): The name of the callable in the module
-    args (tuple): The args to pass to the callable
-    kwargs (dict): The kwargs to pass to the callable
+    To instantiate from a SpecDict, use Spec(**spec_dict).instantiate()
     """
 
     module: str
     name: str
     args: Tuple[Any, ...]
     kwargs: Dict[str, Any]
-    auto_call: bool
+    called: bool
 
-    @staticmethod
-    def create_partial(callable_or_full_name: Union[str, callable], *args, **kwargs) -> "Spec":  # type: ignore
+
+@dataclasses.dataclass
+class Spec:
+    """A JSON-friendly representation of a callable (function or class) with default args and kwargs.
+
+    A spec is first *created*, (potentially serialized in the middle), then *instantiated*.
+
+    Usage:
+        >>> from my_module import my_function
+        >>> Spec.create(my_function)(arg1=1, arg2=2).instantiate() == my_function(arg1=1, arg2=2)
+        >>> Spec.create(my_function).partial(arg1=1, arg2=2).instantiate() == partial(my_function, arg1=1, arg2=2)
+
+        # Specs can be easily serialized
+        >>> spec.to_dict()
+
+        # The following are also possible
+        >>> Spec.create(my_function).partial(arg1=1, arg2=2) == Spec.create(my_function, arg1=1, arg2=2)
+        >>> spec = Spec.create(partial(my_function, arg1=1, arg2=2))
+        >>> spec = Spec.create("my_module:my_function", arg1=1, arg2=2)
+
+
+    module (str): The module the callable is located in
+    name (str): The name of the callable in the module
+    args (tuple): The args to pass to the callable
+    kwargs (dict): The kwargs to pass to the callable
+    called (bool): Whether or not the callable should be called upon instantiation.
+    """
+
+    module: str
+    name: str
+    args: Tuple[Any, ...]
+    kwargs: Dict[str, Any]
+    called: bool
+
+    def instantiate(self):
+        fn = _import_from_string(self.module, self.name)
+        fn = partial(fn, *self.args, **self.kwargs)
+        if self.called:
+            return fn()
+        else:
+            return fn
+
+    @classmethod
+    def create(cls, callable_or_full_name: Union[str, callable], *args, **kwargs) -> "Spec":  # type: ignore
         """Create a module spec from a callable or import string. When this spec is instantiated,
-           it will return a partial object.
+           it will return a partial object with the given args and kwargs.
 
         Args:
             callable_or_full_name (str or object): Either the object itself or a fully qualified import string
                 (e.g. "octo.model.components.transformer:Transformer")
-        args (tuple, optional): Passed into callable upon instantiation.
-        kwargs (dict, optional): Passed into callable upon instantiation.
+            args (tuple, optional): Passed into callable upon instantiation.
+            kwargs (dict, optional): Passed into callable upon instantiation.
         """
         if isinstance(callable_or_full_name, str):
             assert callable_or_full_name.count(":") == 1, (
@@ -60,26 +83,32 @@ class Spec(TypedDict):
                 callable_or_full_name = callable_or_full_name.func
             module, name = _infer_full_name(callable_or_full_name)
 
-        return Spec(module=module, name=name, args=args, kwargs=kwargs, auto_call=False)
+        return cls(module=module, name=name, args=args, kwargs=kwargs, called=False)
 
-    @staticmethod
-    def create_called(callable_or_full_name: Union[str, callable], *args, **kwargs) -> "Spec":  # type: ignore
-        """Create a module spec from a callable or import string. When this spec is instantiated,
-        it will return the result of calling the callable, with the given args and kwargs.
+    def partial(self, *args, **kwargs):
+        """Add additional args and kwargs to the spec. (Functional, not in-place)"""
+        assert (
+            not self.called
+        ), "Cannot call partial on a spec that has already been called"
+        new_args = self.args + args
+        new_kwargs = {**self.kwargs, **kwargs}
+        return dataclasses.replace(self, args=new_args, kwargs=new_kwargs)
+
+    def __call__(self, *args: Any, **kwds: Any) -> Any:
+        """Add additional args and kwargs to the spec, and marks it for calling. (Functional, not in-place)
+
+        When this spec is instantiated, it will execute the callable with the given args and kwargs, instead of returning a partial object.
         """
-        spec = Spec.create_partial(callable_or_full_name, *args, **kwargs)
-        spec["auto_call"] = True
-        return spec
+        assert not self.called, "Cannot call a spec that has already been called"
+        new_args = self.args + args
+        new_kwargs = {**self.kwargs, **kwds}
+        return dataclasses.replace(self, args=new_args, kwargs=new_kwargs, called=True)
 
-    @staticmethod
-    def instantiate(spec: "Spec"):  # type: ignore
-        assert is_spec(spec), f"Expected Spec, but got {spec}"
-        fn = _import_from_string(spec["module"], spec["name"])
-        fn = partial(fn, *spec["args"], **spec["kwargs"])
-        if spec["auto_call"]:
-            return fn()
-        else:
-            return fn
+    def to_dict(self):
+        return dataclasses.asdict(self)
+
+    def __iter__(self):
+        return iter(self.to_dict().items())
 
 
 def _infer_full_name(o: object):
@@ -105,16 +134,14 @@ def _import_from_string(module_string: str, name: str):
         raise ValueError(f"Could not import {module_string}:{name}") from e
 
 
-def is_spec(spec: dict):
-    return hasattr(spec, "keys") and set(spec.keys()) == {
-        "module",
-        "name",
-        "args",
-        "kwargs",
-    }
+def _is_spec_dict(spec_dict: dict):
+    return hasattr(spec_dict, "keys") and set(spec_dict.keys()) == set(
+        SpecDict.__annotations__.keys()
+    )
 
 
 def _compress_partial(p: partial):
+    """Compresses a nested partial into a single partial object."""
     args = tuple()
     kwargs = dict()
     fn = p.func
@@ -140,7 +167,11 @@ def recursive_create_spec(o: object):
         args = recursive_create_spec(o.args)
         kwargs = recursive_create_spec(o.keywords)
         fn = o.func
-        return Spec.create_partial(fn, *args, **kwargs)
+        return Spec.create(fn, *args, **kwargs).to_dict()
+    elif isinstance(o, Spec):
+        args = recursive_create_spec(o.args)
+        kwargs = recursive_create_spec(o.kwargs)
+        return dataclasses.replace(o, args=args, kwargs=kwargs).to_dict()
     elif hasattr(o, "items"):
         # a little hacky, but so that we can use this on ml_collections.ConfigDicts as well
         return type(o)({k: recursive_create_spec(v) for k, v in o.items()})
@@ -150,27 +181,19 @@ def recursive_create_spec(o: object):
         return o
 
 
-def recursive_instantiate_spec(o: dict):
-    """Goes through (a potentially nested) object, and instantiates all Specs.
-    Use this when creating a callable from a config file.
+def recursive_instantiate_spec(o: object):
+    """Goes through (a potentially nested) object, turns all spec dictionaries into Specs, and instantiates them.
+    Use this when loading from a config dict.
 
     Args:
-        o: Either a Spec object, or a nested (list / dict / tuple) containing Specs.
+        o: Either a Spec object, or a nested (list / dict / tuple) containing SpecDicts.
     Returns:
         An object with the same structure as o, but with all Specs instantiated.
     """
-    if is_spec(o):
+    if _is_spec_dict(o):
         args = recursive_instantiate_spec(o["args"])
         kwargs = recursive_instantiate_spec(o["kwargs"])
-        return Spec.instantiate(
-            {
-                "module": o["module"],
-                "name": o["name"],
-                "args": args,
-                "kwargs": kwargs,
-                "auto_call": o["auto_call"],
-            }
-        )
+        return Spec(**{**o, "args": args, "kwargs": kwargs}).instantiate()
     elif hasattr(o, "items"):
         # a little hacky, but so that we can use this on ml_collections.ConfigDicts as well
         return type(o)({k: recursive_instantiate_spec(v) for k, v in o.items()})
