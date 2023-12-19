@@ -33,10 +33,12 @@ class Spec(TypedDict):
     name: str
     args: Tuple[Any, ...]
     kwargs: Dict[str, Any]
+    auto_call: bool
 
     @staticmethod
-    def create(callable_or_full_name: Union[str, callable], *args, **kwargs) -> "Spec":  # type: ignore
-        """Create a module spec from a callable or import string.
+    def create_partial(callable_or_full_name: Union[str, callable], *args, **kwargs) -> "Spec":  # type: ignore
+        """Create a module spec from a callable or import string. When this spec is instantiated,
+           it will return a partial object.
 
         Args:
             callable_or_full_name (str or object): Either the object itself or a fully qualified import string
@@ -58,18 +60,31 @@ class Spec(TypedDict):
                 callable_or_full_name = callable_or_full_name.func
             module, name = _infer_full_name(callable_or_full_name)
 
-        return Spec(module=module, name=name, args=args, kwargs=kwargs)
+        return Spec(module=module, name=name, args=args, kwargs=kwargs, auto_call=False)
+
+    @staticmethod
+    def create_called(callable_or_full_name: Union[str, callable], *args, **kwargs) -> "Spec":  # type: ignore
+        """Create a module spec from a callable or import string. When this spec is instantiated,
+        it will return the result of calling the callable, with the given args and kwargs.
+        """
+        spec = Spec.create_partial(callable_or_full_name, *args, **kwargs)
+        spec["auto_call"] = True
+        return spec
 
     @staticmethod
     def instantiate(spec: "Spec"):  # type: ignore
         assert is_spec(spec), f"Expected Spec, but got {spec}"
         fn = _import_from_string(spec["module"], spec["name"])
-        return partial(fn, *spec["args"], **spec["kwargs"])
+        fn = partial(fn, *spec["args"], **spec["kwargs"])
+        if spec["auto_call"]:
+            return fn()
+        else:
+            return fn
 
 
 def _infer_full_name(o: object):
-    if hasattr(o, "__module__") and hasattr(o, "__name__"):
-        return o.__module__, o.__name__
+    if hasattr(o, "__module__") and hasattr(o, "__qualname__"):
+        return o.__module__, o.__qualname__
     else:
         raise ValueError(
             f"Could not infer identifier for {o}. "
@@ -81,7 +96,11 @@ def _infer_full_name(o: object):
 def _import_from_string(module_string: str, name: str):
     try:
         module = importlib.import_module(module_string)
-        return getattr(module, name)
+        subs = name.split(".")
+        o = module
+        for sub in subs:
+            o = getattr(o, sub)
+        return o
     except Exception as e:
         raise ValueError(f"Could not import {module_string}:{name}") from e
 
@@ -106,7 +125,7 @@ def _compress_partial(p: partial):
     return partial(fn, *args, **kwargs)
 
 
-def recursive_partial_to_spec(o: object):
+def recursive_create_spec(o: object):
     """Goes through (a potentially nested) object, and converts all partial objects to specs.
     Use this when creating a config file from a partial object.
 
@@ -118,36 +137,44 @@ def recursive_partial_to_spec(o: object):
     """
     if isinstance(o, partial):
         o = _compress_partial(o)  # remove nested partials
-        args = recursive_partial_to_spec(o.args)
-        kwargs = recursive_partial_to_spec(o.keywords)
+        args = recursive_create_spec(o.args)
+        kwargs = recursive_create_spec(o.keywords)
         fn = o.func
-        return Spec.create(fn, *args, **kwargs)
+        return Spec.create_partial(fn, *args, **kwargs)
     elif hasattr(o, "items"):
         # a little hacky, but so that we can use this on ml_collections.ConfigDicts as well
-        return type(o)({k: recursive_partial_to_spec(v) for k, v in o.items()})
+        return type(o)({k: recursive_create_spec(v) for k, v in o.items()})
     elif isinstance(o, (list, tuple)):
-        return type(o)(recursive_partial_to_spec(x) for x in o)
+        return type(o)(recursive_create_spec(x) for x in o)
     else:
         return o
 
 
-def recursive_spec_to_partial(o: dict):
-    """Goes through (a potentially nested) object, and converts all Specs to partial objects.
+def recursive_instantiate_spec(o: dict):
+    """Goes through (a potentially nested) object, and instantiates all Specs.
     Use this when creating a callable from a config file.
 
     Args:
         o: Either a Spec object, or a nested (list / dict / tuple) containing Specs.
     Returns:
-        An object with the same structure as o, but with all Specs replaced with partials.
+        An object with the same structure as o, but with all Specs instantiated.
     """
     if is_spec(o):
-        args = recursive_spec_to_partial(o["args"])
-        kwargs = recursive_spec_to_partial(o["kwargs"])
-        return partial(_import_from_string(o["module"], o["name"]), *args, **kwargs)
+        args = recursive_instantiate_spec(o["args"])
+        kwargs = recursive_instantiate_spec(o["kwargs"])
+        return Spec.instantiate(
+            {
+                "module": o["module"],
+                "name": o["name"],
+                "args": args,
+                "kwargs": kwargs,
+                "auto_call": o["auto_call"],
+            }
+        )
     elif hasattr(o, "items"):
         # a little hacky, but so that we can use this on ml_collections.ConfigDicts as well
-        return type(o)({k: recursive_spec_to_partial(v) for k, v in o.items()})
+        return type(o)({k: recursive_instantiate_spec(v) for k, v in o.items()})
     elif isinstance(o, (list, tuple)):
-        return type(o)(recursive_spec_to_partial(x) for x in o)
+        return type(o)(recursive_instantiate_spec(x) for x in o)
     else:
         return o
