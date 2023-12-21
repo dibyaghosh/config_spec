@@ -7,7 +7,7 @@ When converted to a dictionary (e.g. via dict(spec)), it will look like this:
 {
     'target': "torch.optim.adam:Adam" # A fully qualified import name
     'lr': 1e-3,
-    '__dense_spec__': True # Some book-keeping
+    '__config_spec__': True # Indicates that this is a SpecDict, and not a regular dict
 }
 >>> spec.instantiate() ==  Spec.instantiate_from_dict(d) == functools.partial(torch.optim.Adam, lr=1e-3)
 """
@@ -92,7 +92,7 @@ class Spec:
         return _recursive_instantiate_spec(_recursive_from_dict(o))
 
     def _standard_init(self, *args, **kwargs):
-        if kwargs.get("__dense_spec__", False):
+        if kwargs.get("__config_spec__", False):
             kwargs = _undensify_spec_dict(kwargs)
 
         for n, field in enumerate(dataclasses.fields(self)):
@@ -203,7 +203,7 @@ def _is_spec_dict(spec_dict: dict):
 
 
 def _is_dense_spec_dict(spec_dict: dict):
-    return hasattr(spec_dict, "keys") and spec_dict.get("__dense_spec__", False)
+    return hasattr(spec_dict, "keys") and spec_dict.get("__config_spec__", False)
 
 
 def _densify_spec_dict(spec_dict: dict):
@@ -231,14 +231,14 @@ def _densify_spec_dict(spec_dict: dict):
     if spec_dict["called"] is False:
         spec_dict.pop("called")
 
-    spec_dict["__dense_spec__"] = True
+    spec_dict["__config_spec__"] = True
     return spec_dict
 
 
 def _undensify_spec_dict(spec_dict: dict):
     """Reverts a densified spec dict back to its original form"""
     spec_dict = spec_dict.copy()
-    assert spec_dict.pop("__dense_spec__", False), "Spec dict is not dense"
+    assert spec_dict.pop("__config_spec__", False), "Spec dict is not dense"
 
     if "args" not in spec_dict:
         spec_dict["args"] = ()
