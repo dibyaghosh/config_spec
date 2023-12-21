@@ -108,7 +108,13 @@ class Spec:
         return dataclasses.asdict(self)
 
     def __iter__(self):
+        # so that we can do dict(spec)
         return iter(self.to_dict().items())
+
+    @classmethod
+    def from_dense(cls, module, name, args, called, **kwargs):
+        """Creates a spec from a dense spec dict, which has kwargs flattened into the top level."""
+        return cls(module=module, name=name, args=args, kwargs=kwargs, called=called)
 
 
 def _infer_full_name(o: object):
@@ -140,10 +146,32 @@ def _is_spec_dict(spec_dict: dict):
     )
 
 
+def _is_dense_spec_dict(spec_dict: dict):
+    return hasattr(spec_dict, "keys") and spec_dict.get("__dense_spec__", False)
+
+
+def _densify_spec_dict(spec_dict: dict):
+    """Converts a spec dict to a denser form, by flattening kwargs into ."""
+    spec_dict = spec_dict.copy()
+    spec_dict.update(spec_dict.pop("kwargs", {}))
+    spec_dict["__dense_spec__"] = True
+    return spec_dict
+
+
+def _undensify_spec_dict(spec_dict: dict):
+    """Converts a spec dict to a denser form, by flattening kwargs into ."""
+    spec_dict = spec_dict.copy()
+    assert spec_dict.pop("__dense_spec__", False), "Spec dict is not dense"
+    spec_dict["kwargs"] = {
+        k: v for k, v in spec_dict.items() if k not in SpecDict.__annotations__
+    }
+    return spec_dict
+
+
 def _compress_partial(p: partial):
     """Compresses a nested partial into a single partial object."""
-    args = tuple()
-    kwargs = dict()
+    args = p.args
+    kwargs = p.keywords
     fn = p.func
     while isinstance(fn, partial):
         args = fn.args + args
@@ -152,31 +180,37 @@ def _compress_partial(p: partial):
     return partial(fn, *args, **kwargs)
 
 
-def recursive_create_spec(o: object):
-    """Goes through (a potentially nested) object, and converts all partial objects to specs.
-    Use this when creating a config file from a partial object.
+def asdict(o: object, dense: bool = False):
+    """Converting Specs and partial objects to SpecDicts, recursively. Use this when creating a config.
 
     Args:
-        o: Either a partial object, or a nested (list / dict / tuple) containing partials.
+        o: Either a partial object, Spec, or a nested (list / dict / tuple) containing partials.
+        dense: If true, folds kwargs into spec, making the final dict slightly less deep (default: False)
     Returns:
-        An object with the same structure as o, but with all partials replaced with Specs (dictionaries).
+        An object with the same structure as o, but with all partials replaced with SpecDics (dictionaries).
 
     """
     if isinstance(o, partial):
         o = _compress_partial(o)  # remove nested partials
-        args = recursive_create_spec(o.args)
-        kwargs = recursive_create_spec(o.keywords)
+        args = asdict(o.args, dense)
+        kwargs = asdict(o.keywords, dense)
         fn = o.func
-        return Spec.create(fn, *args, **kwargs).to_dict()
+        out = Spec.create(fn, *args, **kwargs).to_dict()
+        if dense:
+            out = _densify_spec_dict(out)
+        return out
     elif isinstance(o, Spec):
-        args = recursive_create_spec(o.args)
-        kwargs = recursive_create_spec(o.kwargs)
-        return dataclasses.replace(o, args=args, kwargs=kwargs).to_dict()
+        args = asdict(o.args, dense)
+        kwargs = asdict(o.kwargs, dense)
+        out = dataclasses.replace(o, args=args, kwargs=kwargs).to_dict()
+        if dense:
+            out = _densify_spec_dict(out)
+        return out
     elif hasattr(o, "items"):
         # a little hacky, but so that we can use this on ml_collections.ConfigDicts as well
-        return type(o)({k: recursive_create_spec(v) for k, v in o.items()})
+        return type(o)({k: asdict(v, dense) for k, v in o.items()})
     elif isinstance(o, (list, tuple)):
-        return type(o)(recursive_create_spec(x) for x in o)
+        return type(o)(asdict(x, dense) for x in o)
     else:
         return o
 
@@ -190,6 +224,9 @@ def recursive_instantiate_spec(o: object):
     Returns:
         An object with the same structure as o, but with all Specs instantiated.
     """
+    if _is_dense_spec_dict(o):
+        o = _undensify_spec_dict(o)
+
     if _is_spec_dict(o):
         args = recursive_instantiate_spec(o["args"])
         kwargs = recursive_instantiate_spec(o["kwargs"])

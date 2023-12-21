@@ -1,6 +1,6 @@
 from config_spec.config_spec import (
     Spec,
     SpecDict,
-    recursive_create_spec,
+    asdict,
     recursive_instantiate_spec,
 )
