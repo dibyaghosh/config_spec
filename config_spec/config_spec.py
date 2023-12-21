@@ -1,20 +1,20 @@
+"""This module provides a Spec class, which is a JSON-friendly representation of a callable (function or class) with default args and kwargs.
+
+When converted to a dictionary (e.g. via dict(spec)), it will look like this:
+>>> spec = Spec(torch.optim.Adam, lr=1e-3)
+<Spec: functools.partial(torch.optim.adam:Adam, lr=0.0001)>
+>>> d = dict(spec)
+{
+    'target': "torch.optim.adam:Adam" # A fully qualified import name
+    'lr': 1e-3,
+    '__dense_spec__': True # Some book-keeping
+}
+>>> spec.instantiate() ==  Spec.instantiate_from_dict(d) == functools.partial(torch.optim.Adam, lr=1e-3)
+"""
 from functools import partial
 import importlib
-from typing import Any, Dict, Tuple, TypedDict, Union
+from typing import Any, Dict, Tuple, TypedDict, Union, Callable
 import dataclasses
-
-
-class SpecDict(TypedDict):
-    """The output of spec.to_dict() or dict(spec): a JSON-serializable dictionary representation of a function or class with default args and kwargs.
-
-    To instantiate from a SpecDict, use Spec(**spec_dict).instantiate()
-    """
-
-    module: str
-    name: str
-    args: Tuple[Any, ...]
-    kwargs: Dict[str, Any]
-    called: bool
 
 
 @dataclasses.dataclass
@@ -37,29 +37,74 @@ class Spec:
         >>> spec = Spec.create("my_module:my_function", arg1=1, arg2=2)
 
 
-    module (str): The module the callable is located in
-    name (str): The name of the callable in the module
+    target (str): The fully-qualified name of a callable (e.g. "torch.optim:Adam")
     args (tuple): The args to pass to the callable
     kwargs (dict): The kwargs to pass to the callable
-    called (bool): Whether or not the callable should be called upon instantiation.
+    called (bool): Whether to return a functools.partial object (called=False) or to call it (called=True)
     """
 
-    module: str
-    name: str
-    args: Tuple[Any, ...]
-    kwargs: Dict[str, Any]
-    called: bool
+    target: str
+    args: Tuple[Any, ...] = ()
+    kwargs: Dict[str, Any] = dataclasses.field(default_factory=dict)
+    called: bool = False
 
-    def instantiate(self):
-        fn = _import_from_string(self.module, self.name)
+    def instantiate(self, recursive: bool = True):
+        """Instantiate the spec, by importing the module and partial/calling the callable with the given args and kwargs.
+
+        If recursive=True, will recursively instantiate any nested specs as well in the args and kwargs.
+        """
+        if recursive:
+            return _recursive_instantiate_spec(self)
+
+        fn = _import_from_string(self.target)
         fn = partial(fn, *self.args, **self.kwargs)
         if self.called:
             return fn()
         else:
             return fn
 
+    def __init__(self, target: Union[str, callable], *args, **kwargs):
+        """Create a spec from a callable. Note: you can also do the standard dataclass init
+
+        Args:
+            target (object): A Callable
+            args (tuple, optional): Passed into callable upon instantiation.
+            kwargs (dict, optional): Passed into callable upon instantiation.
+        """
+
+        if isinstance(target, str):
+            assert (
+                target.count(":") == 1
+            ), "target must be a fully qualified import string (e.g. 'torch.optim:Adam')"
+            # Do the dataclass standard init
+            self._standard_init(target, *args, **kwargs)
+        else:
+            self._init_from_callable(target, *args, **kwargs)
+
     @classmethod
-    def create(cls, callable_or_full_name: Union[str, callable], *args, **kwargs) -> "Spec":  # type: ignore
+    def from_dict(cls, o: object):
+        """Recurses through a nested (list / dict / tuple), converting all SpecDicts to Specs."""
+        return _recursive_from_dict(o)
+
+    @classmethod
+    def instantiate_from_dict(o: object):
+        """Recurses through a nested (list / dict / tuple), converting all SpecDicts to Specs, then instantiates them."""
+        return _recursive_instantiate_spec(_recursive_from_dict(o))
+
+    def _standard_init(self, *args, **kwargs):
+        if kwargs.get("__dense_spec__", False):
+            kwargs = _undensify_spec_dict(kwargs)
+
+        for n, field in enumerate(dataclasses.fields(self)):
+            value = args[n] if n < len(args) else kwargs.get(field.name, field.default)
+            if value == dataclasses.MISSING:
+                if field.default_factory != dataclasses.MISSING:
+                    value = field.default_factory()
+                else:
+                    raise Exception(f"Missing required argument {field.name} for Spec")
+            setattr(self, field.name, value)
+
+    def _init_from_callable(self, target: Callable, *args, **kwargs) -> "Spec":  # type: ignore
         """Create a module spec from a callable or import string. When this spec is instantiated,
            it will return a partial object with the given args and kwargs.
 
@@ -69,21 +114,15 @@ class Spec:
             args (tuple, optional): Passed into callable upon instantiation.
             kwargs (dict, optional): Passed into callable upon instantiation.
         """
-        if isinstance(callable_or_full_name, str):
-            assert callable_or_full_name.count(":") == 1, (
-                "If passing in a string, it must be a fully qualified import string "
-                "(e.g. 'octo.model.components.transformer:Transformer')"
-            )
-            module, name = callable_or_full_name.split(":")
-        else:
-            if isinstance(callable_or_full_name, partial):
-                callable_or_full_name = _compress_partial(callable_or_full_name)
-                kwargs = {**callable_or_full_name.keywords, **kwargs}
-                args = callable_or_full_name.args + args
-                callable_or_full_name = callable_or_full_name.func
-            module, name = _infer_full_name(callable_or_full_name)
+        if isinstance(target, partial):
+            target = _compress_partial(target)
+            kwargs = {**target.keywords, **kwargs}
+            args = target.args + args
+            target = target.func
+        module, name = _infer_full_name(target)
+        target_name = f"{module}:{name}"
 
-        return cls(module=module, name=name, args=args, kwargs=kwargs, called=False)
+        return self._standard_init(target_name, args=args, kwargs=kwargs)
 
     def partial(self, *args, **kwargs):
         """Add additional args and kwargs to the spec. (Functional, not in-place)"""
@@ -104,17 +143,29 @@ class Spec:
         new_kwargs = {**self.kwargs, **kwds}
         return dataclasses.replace(self, args=new_args, kwargs=new_kwargs, called=True)
 
-    def to_dict(self):
-        return dataclasses.asdict(self)
+    def asdict(self, recursive=True, dense=True):
+        if recursive:
+            return asdict(self, dense=dense)
+        else:
+            out = dataclasses.asdict(self)
+            if dense:
+                out = _densify_spec_dict(out)
+            return out
 
     def __iter__(self):
         # so that we can do dict(spec)
-        return iter(self.to_dict().items())
+        return iter(self.asdict().items())
 
-    @classmethod
-    def from_dense(cls, module, name, args, called, **kwargs):
-        """Creates a spec from a dense spec dict, which has kwargs flattened into the top level."""
-        return cls(module=module, name=name, args=args, kwargs=kwargs, called=called)
+    def __repr__(self) -> str:
+        args = [repr(x) for x in self.args]
+        args.extend(f"{k}={v!r}" for (k, v) in self.kwargs.items())
+        if not self.called:
+            return f"<Spec: functools.partial({self.target}, {', '.join(args)})>"
+        else:
+            return f"<Spec: {self.target}({', '.join(args)})>"
+
+
+_spec_field_names = [field.name for field in dataclasses.fields(Spec)]
 
 
 def _infer_full_name(o: object):
@@ -128,7 +179,12 @@ def _infer_full_name(o: object):
         )
 
 
-def _import_from_string(module_string: str, name: str):
+def _import_from_string(target: str):
+    """
+    Args:
+        target: A fully qualified import string (e.g. "torch.optim:Adam")
+    """
+    module_string, name = target.split(":")
     try:
         module = importlib.import_module(module_string)
         subs = name.split(".")
@@ -137,12 +193,12 @@ def _import_from_string(module_string: str, name: str):
             o = getattr(o, sub)
         return o
     except Exception as e:
-        raise ValueError(f"Could not import {module_string}:{name}") from e
+        raise ValueError(f"Could not import {target}") from e
 
 
 def _is_spec_dict(spec_dict: dict):
     return hasattr(spec_dict, "keys") and set(spec_dict.keys()) == set(
-        SpecDict.__annotations__.keys()
+        [f.name for f in dataclasses.fields(Spec)]
     )
 
 
@@ -151,20 +207,52 @@ def _is_dense_spec_dict(spec_dict: dict):
 
 
 def _densify_spec_dict(spec_dict: dict):
-    """Converts a spec dict to a denser form, by flattening kwargs into ."""
+    """Converts a spec dict to a denser form, by
+    1) flattening kwargs into the dict
+    2) removing default options (e.g. args=(), kwargs={}, called=False)
+
+    """
+
     spec_dict = spec_dict.copy()
-    spec_dict.update(spec_dict.pop("kwargs", {}))
+    kwargs = spec_dict.pop("kwargs", {})
+    flattenable_kwargs = {k: v for k, v in kwargs.items() if k not in _spec_field_names}
+    unflattenable_kwargs = {
+        k: v for k, v in kwargs.items() if k in _spec_field_names
+    }  # These would name conflict with attributes of our Spec
+
+    spec_dict.update(flattenable_kwargs)
+    spec_dict["kwargs"] = unflattenable_kwargs
+
+    # Remove default options (will add them back when we undensify)
+    if len(spec_dict["args"]) == 0:
+        spec_dict.pop("args")
+    if len(spec_dict["kwargs"]) == 0:
+        spec_dict.pop("kwargs")
+    if spec_dict["called"] is False:
+        spec_dict.pop("called")
+
     spec_dict["__dense_spec__"] = True
     return spec_dict
 
 
 def _undensify_spec_dict(spec_dict: dict):
-    """Converts a spec dict to a denser form, by flattening kwargs into ."""
+    """Reverts a densified spec dict back to its original form"""
     spec_dict = spec_dict.copy()
     assert spec_dict.pop("__dense_spec__", False), "Spec dict is not dense"
-    spec_dict["kwargs"] = {
-        k: v for k, v in spec_dict.items() if k not in SpecDict.__annotations__
-    }
+
+    if "args" not in spec_dict:
+        spec_dict["args"] = ()
+
+    if "kwargs" not in spec_dict:
+        spec_dict["kwargs"] = {}
+
+    if "called" not in spec_dict:
+        spec_dict["called"] = False
+
+    for k in spec_dict.keys():
+        if k not in _spec_field_names:
+            spec_dict["kwargs"][k] = spec_dict.pop(k)
+
     return spec_dict
 
 
@@ -180,7 +268,7 @@ def _compress_partial(p: partial):
     return partial(fn, *args, **kwargs)
 
 
-def asdict(o: object, dense: bool = False):
+def asdict(o: object, dense: bool = True):
     """Converting Specs and partial objects to SpecDicts, recursively. Use this when creating a config.
 
     Args:
@@ -190,51 +278,60 @@ def asdict(o: object, dense: bool = False):
         An object with the same structure as o, but with all partials replaced with SpecDics (dictionaries).
 
     """
-    if isinstance(o, partial):
-        o = _compress_partial(o)  # remove nested partials
-        args = asdict(o.args, dense)
-        kwargs = asdict(o.keywords, dense)
-        fn = o.func
-        out = Spec.create(fn, *args, **kwargs).to_dict()
-        if dense:
-            out = _densify_spec_dict(out)
+    is_special = lambda x: isinstance(x, (partial, Spec)) or callable(x)
+
+    def _asdict(o: object):
+        if not isinstance(o, Spec):
+            if not isinstance(o, partial):
+                o = partial(o)
+            o = _compress_partial(o)  # remove nested partials
+            o = Spec(o.func, *o.args, **o.keywords)
+        args = _tree_map(_asdict, o.args, is_special)
+        kwargs = _tree_map(_asdict, o.kwargs, is_special)
+        out = dataclasses.replace(o, args=args, kwargs=kwargs).asdict(
+            recursive=False, dense=dense
+        )
         return out
-    elif isinstance(o, Spec):
-        args = asdict(o.args, dense)
-        kwargs = asdict(o.kwargs, dense)
-        out = dataclasses.replace(o, args=args, kwargs=kwargs).to_dict()
-        if dense:
-            out = _densify_spec_dict(out)
-        return out
-    elif hasattr(o, "items"):
+
+    return _tree_map(_asdict, o, is_special)
+
+
+def _tree_map(fn, o: object, is_leaf: Callable[[object], bool]):
+    """Apply a function to all elements of a nested object (list, dict, tuple) that satisfy a predicate."""
+    if is_leaf(o):
+        return fn(o)
+    if hasattr(o, "items"):
         # a little hacky, but so that we can use this on ml_collections.ConfigDicts as well
-        return type(o)({k: asdict(v, dense) for k, v in o.items()})
+        return type(o)({k: _tree_map(fn, v, is_leaf) for k, v in o.items()})
     elif isinstance(o, (list, tuple)):
-        return type(o)(asdict(x, dense) for x in o)
+        return type(o)(_tree_map(fn, x, is_leaf) for x in o)
     else:
         return o
 
 
-def recursive_instantiate_spec(o: object):
-    """Goes through (a potentially nested) object, turns all spec dictionaries into Specs, and instantiates them.
-    Use this when loading from a config dict.
+def _recursive_from_dict(o: object):
+    """Recursively creates a Spec from a SpecDict"""
+    is_spec_dict = lambda x: _is_spec_dict(x) or _is_dense_spec_dict(x)
 
-    Args:
-        o: Either a Spec object, or a nested (list / dict / tuple) containing SpecDicts.
-    Returns:
-        An object with the same structure as o, but with all Specs instantiated.
-    """
-    if _is_dense_spec_dict(o):
-        o = _undensify_spec_dict(o)
+    def f(x):
+        if _is_dense_spec_dict(x):
+            x = _undensify_spec_dict(x)
+        args = _tree_map(f, x["args"], is_spec_dict)
+        kwargs = _tree_map(f, x["kwargs"], is_spec_dict)
+        return Spec(**{**x, "args": args, "kwargs": kwargs})
 
-    if _is_spec_dict(o):
-        args = recursive_instantiate_spec(o["args"])
-        kwargs = recursive_instantiate_spec(o["kwargs"])
-        return Spec(**{**o, "args": args, "kwargs": kwargs}).instantiate()
-    elif hasattr(o, "items"):
-        # a little hacky, but so that we can use this on ml_collections.ConfigDicts as well
-        return type(o)({k: recursive_instantiate_spec(v) for k, v in o.items()})
-    elif isinstance(o, (list, tuple)):
-        return type(o)(recursive_instantiate_spec(x) for x in o)
-    else:
-        return o
+    return _tree_map(f, o, is_spec_dict)
+
+
+def _recursive_instantiate_spec(o: object):
+    is_spec = lambda x: isinstance(x, Spec)
+
+    def instantiate(x):
+        x = dataclasses.replace(
+            x,
+            args=_tree_map(instantiate, x.args, is_spec),
+            kwargs=_tree_map(instantiate, x.kwargs, is_spec),
+        )
+        return x.instantiate(recursive=False)
+
+    return _tree_map(instantiate, o, is_spec)
