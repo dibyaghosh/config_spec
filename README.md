@@ -35,15 +35,26 @@ Adding these features require greatly increasing the amount of boilerplate code 
         'tx': Spec(torch.optim.Adam, lr=1e-3),
         'model': Spec(create_model, num_layers=3, activations=Spec(torch.nn.functional.relu)),
     })
-    # A fully JSON-serializable dict! And every argument (e.g. which optimizer, activation function, etc.) is specified in the config, and overridable
-    tx = Spec.instantiate_from_dict(config['tx'])(model.parameters())  # instantiate returns a functools.partial object
-    model = Spec.instantiate_from_dict(config['model'])()
+    # A dictionary that's fully JSON-serializable! And every argument (e.g. which optimizer, activation function, etc.) is specified in the config, and overridable
 
+    # Now, somewhere deep inside our codebase:
+    optimizer_factory = Spec.instantiate_from_dict(config['tx']) # returns functools.partial(torch.optim.Adam, lr=1e-3)
+    tx = optimizer_factory(model.parameters())
+    model_factory = Spec.instantiate_from_dict(config['model']) # returns functools.partial(create_model, num_layers=3, activations=torch.nn.functional.relu)
+    model = model_factory()
+    
     # How to modify things?
     >>> config['tx']['lr'] = 1e-4
     >>> config['tx']['target'] = 'torch.optim:AdamW
     >>> config['tx']['beta1'] = 0.9 # Add new kwargs easy!
     >>> config['model']['activations']['target'] = 'torch.nn.functional:gelu'
+
+    # Note: you can directly call `Spec.instantiate_from_dict` on the config dictionary (this will recursively instantiate all the specs in the config)
+    >>> config = Spec.instantiate_from_dict(config)
+    >>> tx = config['tx'](model.parameters())
+    >>> model = config['model']()
+
+
 ```
 
 ## Installation:
