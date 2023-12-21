@@ -22,7 +22,8 @@ Many ML workflows look like this:
     model = create_model(num_layers=config['num_layers'], activations=activations) 
 ```
 
-This is fine, but it's not very flexible. 
+This is fine, but it's not ideal. For one, it's hard to understand exactly what's going on from the config. We now have to look deep into the code to understand the design decisions being made (e.g. what optimizer are we using? Are there any default values that I'm not aware of?) It's also not flexible: 
+
 - What if we want to add new kwargs to `create_model`?
 - What if we want to choose the optimizer between Adam or AdamW?
 - What if we wanted to use a custom activation function that isn't in `torch.nn.functional`? 
@@ -30,31 +31,52 @@ This is fine, but it's not very flexible.
 Adding these features require greatly increasing the amount of boilerplate code we have to write in the model init. But it's inherently a problem of configuration! Here's how you can use `config_spec` to solve this problem:
 
 ```python
-    from config_spec import Spec, asdict
-    config = asdict({
-        'tx': Spec(torch.optim.Adam, lr=1e-3),
-        'model': Spec(create_model, num_layers=3, activations=Spec(torch.nn.functional.relu)),
-    })
-    # A dictionary that's fully JSON-serializable! And every argument (e.g. which optimizer, activation function, etc.) is specified in the config, and overridable
+from config_spec import Spec
+config = Spec.asdict({
+    'tx': functools.partial(torch.optim.Adam, lr=1e-3),
+    'model': functools.partial(create_model, num_layers=3, activations=torch.nn.functional.relu),
+})
+# A dictionary that's fully JSON-serializable! And every argument (e.g. which optimizer, activation function, etc.) is specified in the config, and overridable
 
-    # Now, somewhere deep inside our codebase:
-    optimizer_factory = Spec.instantiate_from_dict(config['tx']) # returns functools.partial(torch.optim.Adam, lr=1e-3)
-    tx = optimizer_factory(model.parameters())
-    model_factory = Spec.instantiate_from_dict(config['model']) # returns functools.partial(create_model, num_layers=3, activations=torch.nn.functional.relu)
-    model = model_factory()
-    
-    # How to modify things?
+
+# Now, somewhere deep inside our codebase:
+config = Spec.instantiate(config) # Instantiates all the specs in the dictionary
+# config['tx'] == functools.partial(torch.optim.Adam, lr=1e-3)
+tx = config['tx'](model.parameters()) 
+# config['model'] == functools.partial(create_model, num_layers=3, activations=torch.nn.functional.relu)
+model = config['model']() 
+```
+
+How is this better? 1) It makes the config more transparent (e.g. we see exactly what changing the config does) 2) It makes things more easy to override
+
+```python
+    # We can easily modify the config dict in any way we want
     >>> config['tx']['lr'] = 1e-4
     >>> config['tx']['target'] = 'torch.optim:AdamW
     >>> config['tx']['beta1'] = 0.9 # Add new kwargs easy!
     >>> config['model']['activations']['target'] = 'torch.nn.functional:gelu'
+```
 
-    # Note: you can directly call `Spec.instantiate_from_dict` on the config dictionary (this will recursively instantiate all the specs in the config)
-    >>> config = Spec.instantiate_from_dict(config)
-    >>> tx = config['tx'](model.parameters())
-    >>> model = config['model']()
+What does this config dictionary look like anyways?
 
-
+```python
+>>> config
+{
+    tx: {
+        target: 'torch.optim.adam:Adam',
+        lr: 0.001,
+        __config_spec__: True,
+    },
+    model: {
+        target: 'model:create_model',
+        num_layers: 3,
+        activations: {
+            target: 'torch.nn.functional:relu',
+            __config_spec__: True,
+        },
+        __config_spec__: True,
+    },
+}
 ```
 
 ## Installation:
