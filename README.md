@@ -1,6 +1,6 @@
 # config_spec
 
-A small library to help create JSON-serializable configs for functions. 
+A small library to help create JSON-serializable configs for functions. It may be thought of as a lightweight alternative to hydra.utils.instantiate
 
 ## What and Why?
 
@@ -63,21 +63,17 @@ What does this config dictionary look like anyways?
 >>> config
 {
     tx: {
-        target: 'torch.optim.adam:Adam',
+        _target_: 'torch.optim.adam:Adam',
         lr: 0.001,
-        __config_spec__: True,
     },
     model: {
-        target: 'model:create_model',
+        _target_: 'model:create_model',
         num_layers: 3,
         activations: {
-            target: 'torch.nn.functional:relu',
-            __config_spec__: True,
+            _target_: 'torch.nn.functional:relu',
         },
-        __config_spec__: True,
     },
-}
-```
+}```
 
 ## Installation:
 
@@ -91,37 +87,33 @@ pip install git+https://github.com/dibyaghosh/config_spec.git
 
 ## Basic Usage
 
-You can create a spec either by using the `Spec` class, or just directly creating a dictionary with (at least) a `target` key, and a `__config_spec__` key. The `target` key is a fully qualified import name (e.g. `torch.optim.Adam`), and the `__config_spec__` key is to help the library know that this dictionary is a spec, and not just a regular dictionary.
+You can create a spec either by using the `Spec` class, or just directly creating a dictionary with (at least) a `_target_` key. The `_target_` key is a fully qualified import name (e.g. `torch.optim:Adam`).
 
 ```python
 >>> spec = Spec(torch.optim.Adam, lr=1e-3)
-<Spec: functools.partial(torch.optim.adam:Adam, lr=0.0001)>
+<Spec: functools.partial(torch.optim.adam:Adam, lr=0.001)>
 >>> d = dict(spec)
-{
-    'target': "torch.optim.adam:Adam" # A fully qualified import name
-    'lr': 1e-3,
-    '__config_spec__': True # Tells the library that this is a spec, and not just a regular dictionary
-}
->>> spec.instantiate() ==  Spec.instantiate_from_dict(d) == functools.partial(torch.optim.Adam, lr=1e-3)
+{'_target_': 'torch.optim.adam:Adam', 'lr': 0.001}
+>>> Spec.instantiate(spec) == Spec.instantiate(d) == functools.partial(torch.optim.Adam, lr=1e-3)
 ```
 
 ```python
 from model import create_model
-from config_spec import Spec, asdict
+from config_spec import Spec
 config = {
     'model': functools.partial(create_model, num_layers=3),
     'optimizer': functools.partial(torch.optim.Adam, lr=1e-3),
     'num_steps': 1000,
     'batch_size': 32,
 } # But this isn't serializable!
-config = asdict(config) # a dictionary
+config = Spec.asdict(config) # a dictionary
 with open('config.json', 'w') as f:
     json.dump(config, f)
 
 # Later, when you want to load the config:
 with open('config.json', 'r') as f:
     config = json.load(f)
-config = Spec.instantiate_from_dict(config)
+config = Spec.instantiate(config) # get back the original config
 ```
 
 

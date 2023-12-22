@@ -45,10 +45,11 @@ class Spec:
     return_type (str): Whether to return a functools.partial object ('partial') or to call it with the provided params ('called')
     """
 
-    target: str
+    _target_: str
     args: Tuple[Any, ...] = ()
     kwargs: Dict[str, Any] = dataclasses.field(default_factory=dict)
-    return_type: str = "partial"
+    _return_type_: str = "partial"
+    _recursive_: bool = True
 
     @classmethod
     def instantiate(cls, o: object):
@@ -65,8 +66,9 @@ class Spec:
         is_spec = lambda x: isinstance(x, cls)
 
         def instantiate(x: Spec):
-            x.args = _tree_map(instantiate, x.args, is_spec)
-            x.kwargs = _tree_map(instantiate, x.kwargs, is_spec)
+            if x._recursive_:
+                x.args = _tree_map(instantiate, x.args, is_spec)
+                x.kwargs = _tree_map(instantiate, x.kwargs, is_spec)
             return x._instantiate()
 
         return _tree_map(instantiate, o, is_spec)
@@ -76,17 +78,17 @@ class Spec:
 
         You should probably use Spec.instantiate instead, which will recursively instantiate any nested specs as well.
         """
-        fn = _import_from_string(self.target)
+        fn = _import_from_string(self.target_)
         if len(self.args) > 0 or len(self.kwargs) > 0:
             fn = partial(fn, *self.args, **self.kwargs)
-        if self.return_type == "called":
+        if self._return_type_ == "called":
             return fn()
-        elif self.return_type == "partial":
+        elif self._return_type_ == "partial":
             return fn
         else:
             raise ValueError(f"Invalid return_type: {self.return_type}")
 
-    def __init__(self, target: Union[str, callable], *args, **kwargs):
+    def __init__(self, _target_: Union[str, callable], *args, **kwargs):
         """Create a spec from a callable. Note: you can also do the standard dataclass init
 
         Args:
@@ -95,25 +97,24 @@ class Spec:
             kwargs (dict, optional): Passed into callable upon instantiation.
         """
 
-        if isinstance(target, str):
+        if isinstance(_target_, str):
             # Do the dataclass standard init
-            self._standard_init(target, *args, **kwargs)
+            self._standard_init(_target_, *args, **kwargs)
         else:
-            self._init_from_callable(target, *args, **kwargs)
+            self._init_from_callable(_target_, *args, **kwargs)
 
     def __post_init__(self):
         assert (
-            self.target.count(":") == 1
+            self._target_.count(":") == 1
         ), f"target must be a fully qualified import string (e.g. 'torch.optim:Adam'), received {self.target}"
 
     @classmethod
     def from_dict(cls, o: object):
         """Recurses through a nested (list / dict / tuple), converting all SpecDicts to Specs."""
-        is_spec_dict = lambda x: _is_spec_dict(x) or _is_dense_spec_dict(x)
+        is_spec_dict = lambda x: _is_spec_dict(x)
 
         def f(x: dict):
-            if _is_dense_spec_dict(x):
-                x = _undensify_spec_dict(x)
+            x = _undensify_spec_dict(x)
 
             args = _tree_map(f, x["args"], is_spec_dict)
             kwargs = _tree_map(f, x["kwargs"], is_spec_dict)
@@ -123,8 +124,7 @@ class Spec:
 
     def _standard_init(self, *args, **kwargs):
         """Standard dataclass init, but with some extra checks and modifications."""
-        if kwargs.get("__config_spec__", False):
-            kwargs = _undensify_spec_dict(kwargs)
+        kwargs = _undensify_spec_dict(kwargs)
 
         # Standard dataclass init part
         for n, field in enumerate(dataclasses.fields(self)):
@@ -142,16 +142,17 @@ class Spec:
                 return Spec(x)
             return x  # is already a spec
 
-        self.args = _tree_map(
-            convert_to_spec,
-            self.args,
-            lambda x: callable(x) or _is_spec_dict(x) or _is_dense_spec_dict(x),
-        )
-        self.kwargs = _tree_map(
-            convert_to_spec,
-            self.kwargs,
-            lambda x: callable(x) or _is_spec_dict(x) or _is_dense_spec_dict(x),
-        )
+        if self._recursive_:
+            self.args = _tree_map(
+                convert_to_spec,
+                self.args,
+                lambda x: callable(x) or _is_spec_dict(x),
+            )
+            self.kwargs = _tree_map(
+                convert_to_spec,
+                self.kwargs,
+                lambda x: callable(x) or _is_spec_dict(x),
+            )
 
     def _init_from_callable(self, target: Callable, *args, **kwargs) -> "Spec":  # type: ignore
         """Create a module spec from a callable or import string. When this spec is instantiated,
@@ -177,7 +178,7 @@ class Spec:
     def partial(self, *args, **kwargs):
         """Add additional args and kwargs to the spec. (Functional, not in-place)"""
         assert (
-            self.return_type != "called"
+            self._return_type_ != "called"
         ), "Cannot call partial on a spec that has already been called"
         new_args = self.args + args
         new_kwargs = {**self.kwargs, **kwargs}
@@ -189,12 +190,12 @@ class Spec:
         When this spec is instantiated, it will execute the callable with the given args and kwargs, instead of returning a partial object.
         """
         assert (
-            self.return_type != "called"
+            self._return_type_ != "called"
         ), f"Cannot call a spec that has already been called: {self!r}"
         new_args = self.args + args
         new_kwargs = {**self.kwargs, **kwds}
         return dataclasses.replace(
-            self, args=new_args, kwargs=new_kwargs, return_type="called"
+            self, args=new_args, kwargs=new_kwargs, _return_type_="called"
         )
 
     @classmethod
@@ -202,12 +203,12 @@ class Spec:
         """Converts a Spec to a SpecDict, recursively. Use this when serializing a config."""
 
         def f(x: Callable):
-            print(x)
             if not isinstance(x, cls):
                 x = cls(x)
             x: Spec = dataclasses.replace(x)  # Copy, don't mutate the original
-            x.args = cls.asdict(x.args)
-            x.kwargs = cls.asdict(x.kwargs)
+            if x._recursive_:
+                x.args = cls.asdict(x.args)
+                x.kwargs = cls.asdict(x.kwargs)
             return _densify_spec_dict(dataclasses.asdict(x))
 
         return _tree_map(f, o, callable)
@@ -219,10 +220,16 @@ class Spec:
     def __repr__(self) -> str:
         args = [repr(x) for x in self.args]
         args.extend(f"{k}={v!r}" for (k, v) in self.kwargs.items())
-        if self.return_type != "called":
-            return f"<Spec: functools.partial({self.target}, {', '.join(args)})>"
+        if len(args) == 0:
+            if self._return_type_ != "called":
+                return f"<Spec: {self._target_}>"
+            else:
+                return f"<Spec: {self._target_}()>"
+
+        if self._return_type_ != "called":
+            return f"<Spec: functools.partial({self._target_}, {', '.join(args)})>"
         else:
-            return f"<Spec: {self.target}({', '.join(args)})>"
+            return f"<Spec: {self._target_}({', '.join(args)})>"
 
 
 _spec_field_names = [field.name for field in dataclasses.fields(Spec)]
@@ -257,13 +264,7 @@ def _import_from_string(target: str):
 
 
 def _is_spec_dict(spec_dict: dict):
-    return hasattr(spec_dict, "keys") and set(spec_dict.keys()) == set(
-        [f.name for f in dataclasses.fields(Spec)]
-    )
-
-
-def _is_dense_spec_dict(spec_dict: dict):
-    return hasattr(spec_dict, "keys") and spec_dict.get("__config_spec__", False)
+    return hasattr(spec_dict, "keys") and "_target_" in spec_dict
 
 
 def _default(field: dataclasses.Field):
@@ -278,7 +279,7 @@ def _default(field: dataclasses.Field):
 def _densify_spec_dict(spec_dict: dict):
     """Converts a spec dict to a denser form, by
     1) flattening kwargs into the dict
-    2) removing default options (e.g. args=(), kwargs={}, return_type='partial')
+    2) removing default options
 
     """
 
@@ -298,20 +299,18 @@ def _densify_spec_dict(spec_dict: dict):
         if spec_dict[field.name] == default_value:
             spec_dict.pop(field.name)
 
-    spec_dict["__config_spec__"] = True
     return spec_dict
 
 
 def _undensify_spec_dict(spec_dict: dict):
     """Reverts a densified spec dict back to its original form"""
     spec_dict = spec_dict.copy()
-    assert spec_dict.pop("__config_spec__", False), "Spec dict is not dense"
 
     for field in dataclasses.fields(Spec):
         if field.name not in spec_dict:
             spec_dict[field.name] = _default(field)
 
-    for k in spec_dict.keys():
+    for k in list(spec_dict.keys()):
         if k not in _spec_field_names:
             spec_dict["kwargs"][k] = spec_dict.pop(k)
 
