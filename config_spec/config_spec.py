@@ -14,6 +14,7 @@ from functools import partial
 import importlib
 from typing import Any, Dict, Tuple, TypedDict, Union, Callable
 import dataclasses
+import copy
 
 
 @dataclasses.dataclass
@@ -86,7 +87,7 @@ class Spec:
 
         You should probably use Spec.instantiate instead, which will recursively instantiate any nested specs as well.
         """
-        fn = _import_from_string(self.target_)
+        fn = _import_from_string(self._target_)
         if len(self.args) > 0 or len(self.kwargs) > 0:
             fn = partial(fn, *self.args, **self.kwargs)
         if self._return_type_ == "called":
@@ -216,7 +217,7 @@ class Spec:
         def f(x: Callable):
             if not isinstance(x, cls):
                 x = cls(x)
-            x: Spec = dataclasses.replace(x)  # Copy, don't mutate the original
+            x: Spec = copy.copy(x)
             if x._recursive_:
                 x.args = cls.asdict(x.args)
                 x.kwargs = cls.asdict(x.kwargs)
@@ -294,7 +295,7 @@ def _densify_spec_dict(spec_dict: dict):
 
     """
 
-    spec_dict = spec_dict.copy()
+    spec_dict = dict(spec_dict)
     kwargs = spec_dict.pop("kwargs", {})
     flattenable_kwargs = {k: v for k, v in kwargs.items() if k not in _spec_field_names}
     unflattenable_kwargs = {
@@ -315,7 +316,7 @@ def _densify_spec_dict(spec_dict: dict):
 
 def _undensify_spec_dict(spec_dict: dict):
     """Reverts a densified spec dict back to its original form"""
-    spec_dict = spec_dict.copy()
+    spec_dict = dict(spec_dict)
 
     for field in dataclasses.fields(Spec):
         if field.name not in spec_dict:
