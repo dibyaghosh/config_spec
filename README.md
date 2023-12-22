@@ -13,6 +13,12 @@ It may be thought of as a lightweight alternative to `hydra.utils.instantiate` (
 >>> Spec.instantiate(config) == functools.partial(torch.optim.Adam, lr=1e-3)
 ```
 
+## Installation:
+
+```
+pip install config_spec 
+```
+
 ## What and Why?
 
 
@@ -85,16 +91,6 @@ How is this better? 1) It makes the config more transparent (e.g. we see exactly
     >>> config['model']['activations']['_target_'] = 'torch.nn.functional:gelu'
 ```
 
-
-## Installation:
-
-```
-pip install config_spec 
-```
-
-```
-pip install git+https://github.com/dibyaghosh/config_spec.git
-```
 
 ## Basic Usage
 
