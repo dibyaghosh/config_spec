@@ -5,11 +5,10 @@ When converted to a dictionary (e.g. via dict(spec)), it will look like this:
 <Spec: functools.partial(torch.optim.adam:Adam, lr=0.0001)>
 >>> d = dict(spec)
 {
-    'target': "torch.optim.adam:Adam" # A fully qualified import name
+    '_target_': "torch.optim.adam:Adam" # A fully qualified import name
     'lr': 1e-3,
-    '__config_spec__': True # Indicates that this is a SpecDict, and not a regular dict
 }
->>> spec.instantiate() ==  Spec.instantiate_from_dict(d) == functools.partial(torch.optim.Adam, lr=1e-3)
+>>> Spec.instantiate(spec) ==  Spec.instantiate(d) == functools.partial(torch.optim.Adam, lr=1e-3)
 """
 from functools import partial
 import importlib
@@ -21,7 +20,15 @@ import dataclasses
 class Spec:
     """A JSON-friendly representation of a callable (function or class) with default args and kwargs.
 
-    A spec is first *created*, (potentially serialized in the middle), then *instantiated*.
+    You may directly specify a spec using a dictionary:
+    {
+        '_target_': "torch.optim:Adam" # A fully qualified import name
+        **kwargs_to_pass_to_target
+    }
+    or use the Spec class, which provides some niceties.
+
+    The key function is Spec.instantiate(...) which will "realize" the spec by importing the target function and partial/calling the callable with the given args and kwargs.
+    Spec.instantiate will also recurse into list / dict / tuple structures, instantiating any nested specs in the process.
 
     Usage:
         >>> spec = Spec(torch.optim.Adam, lr=1e-3)
@@ -39,10 +46,11 @@ class Spec:
         >>> Spec.instantiate(spec) == functools.partial(torch.optim.Adam, lr=1e-6)
 
 
-    target (str): The fully-qualified name of a callable (e.g. "torch.optim:Adam")
+    _target_ (str): The fully-qualified name of a callable (e.g. "torch.optim:Adam")
     args (tuple): The args to pass to the callable
     kwargs (dict): The kwargs to pass to the callable
-    return_type (str): Whether to return a functools.partial object ('partial') or to call it with the provided params ('called')
+    _return_type_ (str): Whether to return a functools.partial object ('partial') or to call it with the provided params ('called')
+    _recursive_ (bool): Whether to recursively create / instantiate nested specs (default True)
     """
 
     _target_: str
@@ -104,23 +112,12 @@ class Spec:
             self._init_from_callable(_target_, *args, **kwargs)
 
     def __post_init__(self):
+        if self._target_.count(":") == 0:
+            module, _, name = self._target_.rpartition(".")
+            self._target_ = f"{module}:{name}"
         assert (
             self._target_.count(":") == 1
         ), f"target must be a fully qualified import string (e.g. 'torch.optim:Adam'), received {self.target}"
-
-    @classmethod
-    def from_dict(cls, o: object):
-        """Recurses through a nested (list / dict / tuple), converting all SpecDicts to Specs."""
-        is_spec_dict = lambda x: _is_spec_dict(x)
-
-        def f(x: dict):
-            x = _undensify_spec_dict(x)
-
-            args = _tree_map(f, x["args"], is_spec_dict)
-            kwargs = _tree_map(f, x["kwargs"], is_spec_dict)
-            return cls(**{**x, "args": args, "kwargs": kwargs})
-
-        return _tree_map(f, o, is_spec_dict)
 
     def _standard_init(self, *args, **kwargs):
         """Standard dataclass init, but with some extra checks and modifications."""
@@ -197,6 +194,20 @@ class Spec:
         return dataclasses.replace(
             self, args=new_args, kwargs=new_kwargs, _return_type_="called"
         )
+
+    @classmethod
+    def from_dict(cls, o: object):
+        """Recurses through a nested (list / dict / tuple), converting all SpecDicts to Specs."""
+        is_spec_dict = lambda x: _is_spec_dict(x)
+
+        def f(x: dict):
+            x = _undensify_spec_dict(x)
+
+            args = _tree_map(f, x["args"], is_spec_dict)
+            kwargs = _tree_map(f, x["kwargs"], is_spec_dict)
+            return cls(**{**x, "args": args, "kwargs": kwargs})
+
+        return _tree_map(f, o, is_spec_dict)
 
     @classmethod
     def asdict(cls, o: object):
